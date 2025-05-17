@@ -11,6 +11,6 @@ A Streamlit app that processes PDB files, calculates mean scores, and categorize
 
 ## Installation
 ```bash
-git clone https://github.com/kamalhaider12/bioinfocode/pdb-processor.git
+git clone https://github.com/kamalhaider12/bioinfocode.git
 cd pdb-processor
 pip install -r requirements.txt
