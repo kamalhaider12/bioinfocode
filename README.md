@@ -1,4 +1,6 @@
 # bioinfocode
+#Run app using the following link
+https://pdb-analyzer.streamlit.app/
 ## Description
 A Streamlit app that processes PDB files, calculates mean scores, and categorizes them into high/low score groups.
 
