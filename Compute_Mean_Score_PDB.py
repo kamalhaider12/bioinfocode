@@ -1,0 +1,293 @@
+#!/usr/bin/env python3
+import os
+import streamlit as st
+from multiprocessing import Pool, cpu_count
+import csv
+from datetime import datetime
+import shutil
+import zipfile
+import tempfile
+
+# ===== THIS MUST BE THE VERY FIRST STREAMLIT COMMAND =====
+st.set_page_config(
+    page_title="PDB File Processor",
+    page_icon="🧬",
+    layout="wide"
+)
+
+# Developer information
+ABOUT_INFO = """
+## About This App
+**Developed By:** Kamal Haider  
+**Email:** kamalhaidery5@gmail.com  
+
+This app processes PDB files, calculates mean scores, 
+and categorizes them into high_score and low_score based on a threshold.
+"""
+
+def process_file(pdb_path, output_dir, threshold):
+    base = os.path.basename(pdb_path)
+    scores = []
+    
+    try:
+        with open(pdb_path, 'r') as f:
+            for line in f:
+                if line.startswith('ATOM') or line.startswith('HETATM'):
+                    try:
+                        score = float(line[60:66].strip())
+                        scores.append(score)
+                    except ValueError:
+                        continue
+        
+        if not scores:
+            return (base, None, "skipped", "NO_SCORES")
+        
+        mean_score = sum(scores) / len(scores)
+        
+        if mean_score >= threshold:
+            dest = "high_score"
+        else:
+            dest = "low_score"
+            
+        output_path = os.path.join(output_dir, dest)
+        os.makedirs(output_path, exist_ok=True)
+        
+        try:
+            shutil.copy2(pdb_path, os.path.join(output_path, base))
+            return (base, mean_score, dest, "processed")
+        except Exception as copy_error:
+            return (base, mean_score, "copy_failed", str(copy_error))
+    
+    except Exception as e:
+        return (base, None, "error", str(e))
+
+def process_folder(input_dir, output_dir, threshold, progress_bar, status_text):
+    start_time = datetime.now()
+    os.makedirs(output_dir, exist_ok=True)
+    
+    log_dir = os.path.join(output_dir, "logs")
+    os.makedirs(log_dir, exist_ok=True)
+    
+    timestamp = start_time.strftime('%Y%m%d_%H%M%S')
+    log_file = os.path.join(log_dir, f"processing_{timestamp}.log")
+    csv_file = os.path.join(log_dir, "results.csv")
+    
+    with open(log_file, 'w') as log:
+        log.write(f"Processing started at {start_time}\n")
+        
+        pdb_files = []
+        for root, _, files in os.walk(input_dir):
+            for file in files:
+                if file.lower().endswith('.pdb'):
+                    pdb_files.append(os.path.join(root, file))
+        
+        log.write(f"Found {len(pdb_files)} PDB files to process\n")
+        log.flush()
+        
+        if not pdb_files:
+            return False, "No PDB files found in the uploaded folder"
+        
+        with Pool(processes=cpu_count()) as pool, \
+             open(csv_file, 'w', newline='') as csv_out:
+            
+            writer = csv.writer(csv_out)
+            writer.writerow(["Filename", "MeanScore", "Destination", "Status"])
+            
+            progress_bar.progress(0)
+            status_text.text(f"Starting processing of {len(pdb_files)} files...")
+            
+            for i, result in enumerate(pool.imap_unordered(
+                lambda x: process_file(x, output_dir, threshold), pdb_files)):
+                
+                writer.writerow(result)
+                progress = (i + 1) / len(pdb_files)
+                progress_bar.progress(progress)
+                status_text.text(f"Processed {i+1}/{len(pdb_files)} files")
+                
+                if len(pdb_files) < 100 or i % 10 == 0:
+                    csv_out.flush()
+            
+            progress_bar.progress(1.0)
+            status_text.text(f"Completed processing {len(pdb_files)} files!")
+        
+        end_time = datetime.now()
+        log.write(f"Processing completed at {end_time}\n")
+        log.write(f"Total time: {end_time - start_time}\n")
+        
+        return True, f"✅ Successfully processed {len(pdb_files)} files!"
+
+def process_single_file(uploaded_file, output_dir, threshold, progress_bar, status_text):
+    os.makedirs(output_dir, exist_ok=True)
+    log_dir = os.path.join(output_dir, "logs")
+    os.makedirs(log_dir, exist_ok=True)
+    csv_file = os.path.join(log_dir, "results.csv")
+    
+    progress_bar.progress(0)
+    status_text.text("Starting processing...")
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdb") as tmp_file:
+        tmp_file.write(uploaded_file.getbuffer())
+        tmp_path = tmp_file.name
+
+    result = process_file(tmp_path, output_dir, threshold)
+    os.unlink(tmp_path)  # Clean up temporary file
+
+    progress_bar.progress(50)
+    status_text.text("Creating results file...")
+
+    with open(csv_file, 'w', newline='') as csv_out:
+        writer = csv.writer(csv_out)
+        writer.writerow(["Filename", "MeanScore", "Destination", "Status"])
+        writer.writerow(result)
+
+    # Determine final status
+    status = result[3]
+    if status == "processed":
+        message = f"✅ Successfully processed {uploaded_file.name}"
+        success = True
+    elif status == "skipped":
+        message = f"⚠️ File skipped: {result[3]}"
+        success = False
+    else:
+        message = f"❌ Processing failed: {result[3]}"
+        success = False
+
+    progress_bar.progress(100)
+    status_text.text("Processing complete!")
+
+    return success, message
+
+def main():
+    st.title("PDB File Processor")
+    st.sidebar.title("About")
+    st.sidebar.markdown(ABOUT_INFO)
+    
+    st.markdown("""
+    ### Upload PDB files for processing
+    The app will:
+    - Process single PDB file or multiple files in a ZIP archive
+    - Skip empty or invalid files
+    - Categorize files based on score threshold
+    - Generate a results report
+    """)
+    
+    with st.form("processing_form"):
+        threshold = st.slider("Score Threshold", 0.0, 100.0, 70.0, 0.1)
+        
+        upload_option = st.radio(
+            "Select input type:",
+            ("Single PDB file (.pdb)", "Multiple PDB files (.zip)"),
+            index=0,
+            help="Choose between single PDB file or ZIP archive containing multiple PDB files"
+        )
+        
+        if "Single" in upload_option:
+            uploaded_file = st.file_uploader(
+                "Upload a single PDB file", 
+                type=["pdb"],
+                accept_multiple_files=False,
+                help="Only .pdb files are accepted for single file upload"
+            )
+        else:
+            uploaded_file = st.file_uploader(
+                "Upload a ZIP archive of PDB files", 
+                type=["zip"],
+                accept_multiple_files=False,
+                help="Only .zip files containing .pdb files are accepted"
+            )
+        
+        submitted = st.form_submit_button("Process Files")
+    
+    if submitted:
+        if uploaded_file is None:
+            st.warning("⚠️ Please upload a file before processing")
+            return
+            
+        result_zip = None
+        temp_dir = tempfile.mkdtemp()
+        output_dir = os.path.join(temp_dir, "pdb_results")
+        
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        try:
+            if "Single" in upload_option:
+                if not uploaded_file.name.lower().endswith('.pdb'):
+                    st.error("❌ Invalid file format. Please upload a .pdb file")
+                    return
+                
+                success, message = process_single_file(
+                    uploaded_file, output_dir, threshold, 
+                    progress_bar, status_text
+                )
+                
+                if not success:
+                    st.error(message)
+                    return
+
+            else:
+                if not uploaded_file.name.lower().endswith('.zip'):
+                    st.error("❌ Invalid file format. Please upload a .zip file")
+                    return
+                
+                # Create a temporary file for the ZIP
+                zip_path = os.path.join(temp_dir, uploaded_file.name)
+                with open(zip_path, "wb") as f:
+                    f.write(uploaded_file.getbuffer())
+                
+                # Extract the ZIP
+                extract_dir = os.path.join(temp_dir, "extracted")
+                os.makedirs(extract_dir, exist_ok=True)
+                
+                with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                    # Verify ZIP contains at least one PDB file
+                    pdb_in_zip = any(f.lower().endswith('.pdb') for f in zip_ref.namelist())
+                    if not pdb_in_zip:
+                        st.error("❌ The ZIP file doesn't contain any .pdb files")
+                        return
+                    
+                    zip_ref.extractall(extract_dir)
+                
+                success, message = process_folder(
+                    extract_dir, output_dir, threshold,
+                    progress_bar, status_text
+                )
+                if not success:
+                    st.error(message)
+                    return
+
+            st.success(message)
+            st.balloons()
+            
+            # Create the results ZIP
+            result_zip = os.path.join(temp_dir, "pdb_results.zip")
+            with zipfile.ZipFile(result_zip, 'w') as zipf:
+                for root, _, files in os.walk(output_dir):
+                    for file in files:
+                        file_path = os.path.join(root, file)
+                        arcname = os.path.relpath(file_path, temp_dir)
+                        zipf.write(file_path, arcname)
+            
+            # Offer the ZIP for download
+            with open(result_zip, "rb") as f:
+                st.download_button(
+                    label="⬇️ Download Results (ZIP)",
+                    data=f,
+                    file_name="pdb_results.zip",
+                    mime="application/zip"
+                )
+                
+        except zipfile.BadZipFile:
+            st.error("❌ The uploaded file is not a valid ZIP archive")
+            progress_bar.empty()
+            status_text.empty()
+        except Exception as e:
+            st.error(f"❌ An error occurred: {str(e)}")
+            progress_bar.empty()
+            status_text.empty()
+        finally:
+            # Clean up temporary files
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+if __name__ == "__main__":
+    main()
